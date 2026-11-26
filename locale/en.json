@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Chat Demo",
+    "description": "Opens the official DeepSeek chat-demo beside the conversation and shares this DSH's API configuration and model list."
+  }
+}

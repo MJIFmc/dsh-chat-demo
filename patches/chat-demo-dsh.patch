@@ -1,0 +1,572 @@
+diff --git a/rspack.config.ts b/rspack.config.ts
+index b236b4d..b99c7b6 100644
+--- a/rspack.config.ts
++++ b/rspack.config.ts
+@@ -90,4 +90,9 @@ export const createConfig = ({
+ })
+ 
+ // eslint-disable-next-line import/no-default-export
+-export default defineConfig(createConfig())
++export default defineConfig(
++  createConfig({
++    // DSH 内嵌构建把 API 根地址设为同源代理路径；不设置时保持官方默认地址
++    apiOrigin: process.env.CHAT_DEMO_API_ORIGIN,
++  })
++)
+diff --git a/src/components/chatInput/ChatInput.tsx b/src/components/chatInput/ChatInput.tsx
+index 7a66a71..a9b2ee5 100644
+--- a/src/components/chatInput/ChatInput.tsx
++++ b/src/components/chatInput/ChatInput.tsx
+@@ -9,6 +9,7 @@ import {
+ } from '../base/icons.js'
+ import { setSearch, setThinking, useSettings } from '../../services/settings.js'
+ import { useIsMobile } from '../../app/viewport.js'
++import { modelFeatures } from '../../services/dshConfig.js'
+ import { sendMessage, stopReply, useChatStore } from '../../services/chat/store.js'
+ import {
+   addDraftFiles,
+@@ -53,6 +54,8 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
+   const importingHistory = useChatStore((state) => state.importingHistory)
+   const isMobile = useIsMobile()
+   const search = useSettings((state) => state.search)
++  const model = useSettings((state) => state.model)
++  const features = modelFeatures(model)
+   const fileInputRef = useRef<HTMLInputElement>(null)
+   const textareaRef = useRef<HTMLTextAreaElement>(null)
+   const togglesRef = useRef<HTMLDivElement>(null)
+@@ -74,10 +77,21 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
+     return () => observer.disconnect()
+   }, [t])
+ 
++  // 当前模型不支持服务端工具时，联网搜索开关保持关闭并置灰
++  useEffect(() => {
++    if (!features.serverTools && search) {
++      setSearch(false)
++    }
++  }, [features.serverTools, search])
++
+   const acceptFiles = (files: File[]) => {
+     if (files.length === 0 || useChatStore.getState().importingHistory || !ensureApiKey()) {
+       return
+     }
++    if (!features.image) {
++      showToast({ key: 'modelImageUnsupported', type: 'error' })
++      return
++    }
+     const error = addDraftFiles(sessionId, files, useSettings.getState().apiKey ?? '')
+     if (error) {
+       showToast(error)
+@@ -214,13 +228,19 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
+               <span className={styles.toggleLabel}>{t('thinkingSwitch')}</span>
+             </button>
+           </Tooltip>
+-          <Tooltip content={t('deactivatedSearchTooltip')}>
++          <Tooltip content={features.serverTools ? t('deactivatedSearchTooltip') : t('modelSearchUnsupported')}>
+             <button
+               type="button"
+-              className={clsx(styles.toggle, search && styles.selected)}
++              className={clsx(styles.toggle, search && features.serverTools && styles.selected)}
+               aria-label={t('search')}
+-              aria-pressed={search}
+-              onClick={() => setSearch(!search)}
++              aria-pressed={search && features.serverTools}
++              aria-disabled={!features.serverTools}
++              style={features.serverTools ? undefined : { opacity: 0.45, cursor: 'not-allowed' }}
++              onClick={() => {
++                if (features.serverTools) {
++                  setSearch(!search)
++                }
++              }}
+             >
+               <IconGlobeLanguageOutline14 />
+               <span className={styles.toggleLabel}>{t('search')}</span>
+diff --git a/src/components/settings/SettingsDialog.tsx b/src/components/settings/SettingsDialog.tsx
+index 8032733..160e5e3 100644
+--- a/src/components/settings/SettingsDialog.tsx
++++ b/src/components/settings/SettingsDialog.tsx
+@@ -23,11 +23,13 @@ import {
+   isChineseBrowser,
+   setLocale,
+   setLocation,
++  setModel,
+   setThemePreference,
+   setTtsVoice,
+   useSettings,
+   type ThemePreference,
+ } from '../../services/settings.js'
++import { useDshConfig } from '../../services/dshConfig.js'
+ import { useTranslate, type TranslationKey, type TranslationMessage } from '../../i18n/index.js'
+ import { Button } from '../base/Button.js'
+ import { Modal } from '../base/Modal.js'
+@@ -63,6 +65,7 @@ const SettingsContent = ({
+ }) => {
+   const t = useTranslate()
+   const isMobile = useIsMobile()
++  const managed = useDshConfig((state) => state.managed)
+   // 打开时按调用方指定的分组选中，之后在弹窗内切换
+   const [section, setSection] = useState(() => useSettingsDialog.getState().section)
+   // 切换分组不丢失正在输入的 API Key
+@@ -102,6 +105,7 @@ const SettingsContent = ({
+         <div role="tabpanel" className={styles.content}>
+           {section === 'general' ? (
+             <>
++              <ModelSetting />
+               <ThemeSetting />
+               <LocaleSetting />
+               <TtsVoiceSetting />
+@@ -109,7 +113,7 @@ const SettingsContent = ({
+             </>
+           ) : (
+             <>
+-              <ApiKeyField editor={apiKeyEditor} />
++              {managed ? <ManagedAuthNote /> : <ApiKeyField editor={apiKeyEditor} />}
+               <ImportHistory historyImport={historyImport} disabled={historyBusy} />
+               <ExportHistory disabled={historyBusy} />
+               <SettingCell
+@@ -275,6 +279,48 @@ const LocationSetting = () => {
+   )
+ }
+ 
++/** 对话模型：可选项来自 DSH 宿主配置，纯静态部署时回退到内置模型 */
++const ModelSetting = () => {
++  const t = useTranslate()
++  const model = useSettings((state) => state.model)
++  const models = useDshConfig((state) => state.models)
++  return (
++    <SettingCell
++      label={t('settingsModel')}
++      description={t('settingsModelDescription')}
++      status={null}
++      action={
++        <Select
++          ariaLabel={t('settingsModel')}
++          value={model}
++          options={models.map((item) => ({ value: item.id, label: item.name ?? item.id }))}
++          onChange={setModel}
++        />
++      }
++    />
++  )
++}
++
++/** 由 DSH 代管 API 凭据时展示状态，而不是让用户重复输入 API Key */
++const ManagedAuthNote = () => {
++  const t = useTranslate()
++  const mode = useDshConfig((state) => state.authMode)
++  return (
++    <SettingCell
++      label={t('managedAuthTitle')}
++      description={
++        mode === 'account'
++          ? t('managedAuthAccount')
++          : mode === 'apiKey'
++            ? t('managedAuthApiKey')
++            : t('managedAuthUnavailable')
++      }
++      status={null}
++      action={null}
++    />
++  )
++}
++
+ const LocaleSetting = () => {
+   const t = useTranslate()
+   const locale = useSettings((state) => state.locale)
+diff --git a/src/i18n/en.ts b/src/i18n/en.ts
+index 2d49027..246c5f5 100644
+--- a/src/i18n/en.ts
++++ b/src/i18n/en.ts
+@@ -178,4 +178,15 @@ export const en = {
+   latestReminderLanguage: 'English',
+   settingsLocaleZhCN: 'Simplified Chinese',
+   settingsLocaleEnUS: 'English',
++  settingsModel: 'Model',
++  settingsModelDescription:
++    'Choose the model for new conversations. Smart search, link reading, and auto titles are available on some models only.',
++  modelSearchUnsupported: 'Smart search is unavailable for the selected model',
++  modelImageUnsupported: 'The selected model does not accept attachments',
++  managedAuthTitle: 'API configuration',
++  managedAuthAccount:
++    'Signed in with the local DSH DeepSeek account. No API key is required.',
++  managedAuthApiKey: 'Using the DeepSeek API key saved in the local DSH. No API key is required.',
++  managedAuthUnavailable:
++    'No DeepSeek credential was found in the local DSH. Sign in or configure an API key in DSH first.',
+ } satisfies Record<keyof typeof zh, string>
+diff --git a/src/i18n/zh.ts b/src/i18n/zh.ts
+index d99f058..d0f1c54 100644
+--- a/src/i18n/zh.ts
++++ b/src/i18n/zh.ts
+@@ -169,4 +169,12 @@ export const zh = {
+   latestReminderLanguage: '中文',
+   settingsLocaleZhCN: '简体中文',
+   settingsLocaleEnUS: 'English',
++  settingsModel: '模型',
++  settingsModelDescription: '选择新对话使用的模型；联网搜索、链接阅读与自动标题仅部分模型支持',
++  modelSearchUnsupported: '当前模型不支持联网搜索',
++  modelImageUnsupported: '当前模型不支持附件输入',
++  managedAuthTitle: 'API 配置',
++  managedAuthAccount: '已使用本机 DSH 的 DeepSeek 账号登录，无需填写 API Key',
++  managedAuthApiKey: '已使用本机 DSH 保存的 DeepSeek API Key，无需填写',
++  managedAuthUnavailable: '未检测到本机 DSH 的 DeepSeek 凭据，请先在 DSH 中登录账号或配置 API Key',
+ } as const
+diff --git a/src/index.html b/src/index.html
+index 91df5f9..2bf8811 100644
+--- a/src/index.html
++++ b/src/index.html
+@@ -5,6 +5,22 @@
+     <meta name="viewport" content="width=device-width,initial-scale=1" />
+     <meta name="theme-color" content="#ffffff" />
+     <title>API 使用 demo</title>
++    <script>
++      // DSH 插件内嵌时通过查询参数同步宿主主题与语言；纯静态打开时不产生副作用
++      try {
++        const params = new URLSearchParams(location.search)
++        const theme = params.get('dsh-theme')
++        if (theme === 'light' || theme === 'dark') {
++          localStorage.setItem('chat-demo:theme-preference', theme)
++        }
++        const locale = params.get('dsh-locale')
++        if (locale === 'zh-CN' || locale === 'en-US') {
++          localStorage.setItem('chat-demo:locale', locale)
++        }
++      } catch {
++        // 存储不可用时只在内存中生效
++      }
++    </script>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/src/main.tsx b/src/main.tsx
+index 27cd0d3..3722703 100644
+--- a/src/main.tsx
++++ b/src/main.tsx
+@@ -2,10 +2,40 @@ import { createRoot } from 'react-dom/client'
+ import { App } from './app/App.js'
+ import { setupTheme } from './app/theme.js'
+ import { ensureKatex } from './services/markdown/katex.js'
++import { useDshConfig } from './services/dshConfig.js'
++import { setApiKey, setModel, useSettings } from './services/settings.js'
+ import './app/theme.css'
+ import './app/global.css'
+ 
+ ensureKatex()
+ setupTheme()
+ 
+-createRoot(document.getElementById('root') as HTMLElement).render(<App />)
++const render = () => {
++  createRoot(document.getElementById('root') as HTMLElement).render(<App />)
++}
++
++/**
++ * 先读取宿主配置：在 DSH 中由宿主代管 API 配置时预置占位 Key，
++ * 纯静态部署（无 `/chat-demo/config`）时回退到手动填写 API Key 的流程。
++ */
++void useDshConfig
++  .getState()
++  .load()
++  .finally(() => {
++    const { managed, models, defaultModel } = useDshConfig.getState()
++    if (managed && !useSettings.getState().apiKey) {
++      setApiKey('dsh-managed')
++    }
++    // 保存的模型可能来自另一套宿主配置：不在当前宿主模型列表中就回退到默认模型。
++    const savedModel = useSettings.getState().model
++    if (models.length > 0 && !models.some((model) => model.id === savedModel)) {
++      const next =
++        defaultModel !== null && models.some((model) => model.id === defaultModel)
++          ? defaultModel
++          : models[0].id
++      if (next) {
++        setModel(next)
++      }
++    }
++    render()
++  })
+diff --git a/src/services/api/types.ts b/src/services/api/types.ts
+index 57345b0..57ec0c3 100644
+--- a/src/services/api/types.ts
++++ b/src/services/api/types.ts
+@@ -4,7 +4,8 @@
+  * 声明 deepseek_web_search / deepseek_read_url 或设置 safety_check.level 为 high 时进入扩展模式。
+  */
+ 
+-export type ChatModel = 'deepseek-flash' | 'deepseek-v4-pro'
++/** 模型 id 由宿主配置提供（内置回退 deepseek-flash / deepseek-v4-pro） */
++export type ChatModel = string
+ 
+ // ---------- 响应：内容块 ----------
+ 
+@@ -177,7 +178,8 @@ export type CreateMessageRequest = {
+   system: string
+   messages: MessageParam[]
+   thinking: { type: 'enabled' | 'disabled' }
+-  tools: (DeepseekWebSearchTool | DeepseekReadUrlTool)[]
++  /** 服务端工具仅部分模型支持（deepseek-v4-pro 不支持），不支持时整个字段省略 */
++  tools?: (DeepseekWebSearchTool | DeepseekReadUrlTool)[]
+   safety_check: { level: 'high' }
+   title?: { enabled: boolean }
+ }
+diff --git a/src/services/chat/reply.ts b/src/services/chat/reply.ts
+index 85322eb..2406985 100644
+--- a/src/services/chat/reply.ts
++++ b/src/services/chat/reply.ts
+@@ -305,11 +305,16 @@ export const toRequestMessages = (
+   question: UserMessage,
+   prefix?: AssistantMessage,
+   thinking = prefix?.thinking ?? false,
+-  latestReminder?: string
++  latestReminder?: string,
++  /** 非 deepseek-flash 模型不支持 latest_reminder 扩展，传 false 时整段省略 */
++  includeReminders = true
+ ): MessageParam[] => {
+   const messages: MessageParam[] = []
+   let previousReminder: string | undefined
+   const appendReminder = (reminder: string | undefined) => {
++    if (!includeReminders) {
++      return
++    }
+     // 仅在当前分支首次出现或内容变化时插入快照；缺少快照的消息保持原有内容。
+     if (reminder && reminder !== previousReminder) {
+       messages.push({ role: 'latest_reminder', content: reminder })
+diff --git a/src/services/chat/store.ts b/src/services/chat/store.ts
+index 4e37a75..9ca0418 100644
+--- a/src/services/chat/store.ts
++++ b/src/services/chat/store.ts
+@@ -12,6 +12,7 @@ import {
+   useUploads,
+ } from '../attachments.js'
+ import { useSettings } from '../settings.js'
++import { modelFeatures } from '../dshConfig.js'
+ import { appendBranch, getVisibleMessages, normalizeSession, selectVersion } from './branches.js'
+ import * as db from './db.js'
+ import {
+@@ -262,12 +263,12 @@ export const bindChatPersistence = () => {
+ 
+ /** 按当前开关创建回复：深度思考对应 thinking，智能搜索控制 deepseek_web_search。 */
+ const createReply = (): AssistantMessage => {
+-  const { thinking, search } = useSettings.getState()
++  const { thinking, search, model } = useSettings.getState()
+   return {
+     id: createId(),
+     role: 'assistant',
+     createdAt: Date.now(),
+-    model: MODEL,
++    model,
+     thinking,
+     search,
+     prefix: true,
+@@ -1014,23 +1015,26 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
+         reply = { ...reply, latestReminder }
+         updateReply(sessionId, reply)
+         persist(sessionId)
++        const requestModel = initial.model ?? useSettings.getState().model
++        const features = modelFeatures(requestModel)
+         const messages = toRequestMessages(
+           prepared.history,
+           prepared.question,
+           prepared.prefix,
+           initial.thinking ?? false,
+-          latestReminder
++          latestReminder,
++          features.reminders
+         )
+         const events = streamMessage(
+           useSettings.getState().apiKey ?? '',
+           {
+-            model: initial.model ?? MODEL,
++            model: requestModel,
+             system: SYSTEM_PROMPT,
+             messages,
+             thinking: { type: initial.thinking ? 'enabled' : 'disabled' },
+             safety_check: SAFETY_CHECK,
+-            tools: serverTools(initial.search ?? false),
+-            ...(titleRequests.has(controller) ? { title: { enabled: true } } : {}),
++            ...(features.serverTools ? { tools: serverTools(initial.search ?? false) } : {}),
++            ...(titleRequests.has(controller) && features.title ? { title: { enabled: true } } : {}),
+           },
+           controller.signal
+         )
+diff --git a/src/services/dshConfig.ts b/src/services/dshConfig.ts
+new file mode 100644
+index 0000000..a41c9d0
+--- /dev/null
++++ b/src/services/dshConfig.ts
+@@ -0,0 +1,129 @@
++import { create } from 'zustand'
++
++/** DeepSeek Harness（DSH）宿主注入的模型条目 */
++export type DshModelFeatures = {
++  /** 是否支持 deepseek_read_url / deepseek_web_search 服务端工具 */
++  serverTools?: boolean
++  /** 是否支持服务端自动生成标题 */
++  title?: boolean
++  /** 是否支持 latest_reminder 消息扩展 */
++  reminders?: boolean
++  /** 是否接受图片/附件输入 */
++  image?: boolean
++}
++
++export type DshModel = {
++  id: string
++  name?: string
++  description?: string
++  thinking?: boolean
++  image?: boolean
++  features?: DshModelFeatures
++}
++
++/** 宿主的凭据模式：账号登录 / API Key / 未配置 */
++export type DshAuthMode = 'account' | 'apiKey' | 'none' | null
++
++type DshConfigState = {
++  /** 配置请求是否已经结束（成功或失败） */
++  loaded: boolean
++  /** 是否由本机 DSH 代管 API 配置；为 true 时不需要用户填写 API Key */
++  managed: boolean
++  authMode: DshAuthMode
++  models: DshModel[]
++  defaultModel: string | null
++  load: () => Promise<void>
++}
++
++/** 未连接 DSH 宿主时（例如直接用静态服务器打开 dist）可选的模型 */
++export const FALLBACK_MODELS: DshModel[] = [
++  {
++    id: 'deepseek-flash',
++    name: 'DeepSeek V4.1 Flash',
++    thinking: true,
++    image: true,
++    features: { serverTools: true, title: true, reminders: true, image: true },
++  },
++  {
++    id: 'deepseek-v4-pro',
++    name: 'DeepSeek V4 Pro',
++    thinking: true,
++    image: false,
++    features: { serverTools: false, title: false, reminders: false, image: false },
++  },
++]
++
++/**
++ * 某个模型在本 demo 协议下可用的附加能力。宿主配置优先；
++ * 没有配置时按 deepseek-flash 系列支持服务端工具与标题来保守回退。
++ */
++export const modelFeatures = (modelId: string) => {
++  const model = useDshConfig.getState().models.find((item) => item.id === modelId)
++  const flashLike = /^deepseek-flash/i.test(modelId)
++  return {
++    serverTools: model?.features?.serverTools ?? flashLike,
++    title: model?.features?.title ?? flashLike,
++    reminders: model?.features?.reminders ?? flashLike,
++    image: model?.features?.image ?? model?.image ?? flashLike,
++  }
++}
++
++/**
++ * 读取宿主配置（服务地址固定为同源的 `/chat-demo/config`，由 DSH 插件提供）。
++ * 纯静态部署或请求失败时回退到内置模型列表，并保留手动填写 API Key 的路径。
++ */
++export const useDshConfig = create<DshConfigState>((set, get) => ({
++  loaded: false,
++  managed: false,
++  authMode: null,
++  models: FALLBACK_MODELS,
++  defaultModel: null,
++  async load() {
++    if (get().loaded) {
++      return
++    }
++    const controller = new AbortController()
++    const timer = setTimeout(() => controller.abort(), 5000)
++    try {
++      const response = await fetch('/chat-demo/config', {
++        headers: { Accept: 'application/json' },
++        signal: controller.signal,
++      })
++      if (!response.ok) {
++        throw new Error(`HTTP ${response.status}`)
++      }
++      const config = (await response.json()) as {
++        managed?: boolean
++        models?: DshModel[]
++        defaultModel?: string
++        auth?: { mode?: DshAuthMode }
++      }
++      const models = Array.isArray(config.models)
++        ? config.models.filter(
++            (model): model is DshModel =>
++              typeof model?.id === 'string' && model.id.length > 0
++          )
++        : []
++      set({
++        loaded: true,
++        managed: config.managed === true,
++        authMode: config.auth?.mode ?? null,
++        models: models.length > 0 ? models : FALLBACK_MODELS,
++        defaultModel:
++          typeof config.defaultModel === 'string' && config.defaultModel.length > 0
++            ? config.defaultModel
++            : null,
++      })
++    } catch {
++      set({
++        loaded: true,
++        managed: false,
++        authMode: null,
++        models: FALLBACK_MODELS,
++        defaultModel: null,
++      })
++    } finally {
++      clearTimeout(timer)
++    }
++  },
++}))
+diff --git a/src/services/settings.ts b/src/services/settings.ts
+index 078543b..cca4b24 100644
+--- a/src/services/settings.ts
++++ b/src/services/settings.ts
+@@ -7,9 +7,10 @@ export type Locale = 'zh-CN' | 'en-US'
+ /** 主题偏好；默认跟随系统 */
+ export type ThemePreference = 'light' | 'dark' | 'system'
+ 
+-/** 本机设置，存 localStorage：API Key、语言、主题、位置、朗读音色、深度思考与智能搜索开关、侧边栏收起状态 */
++/** 本机设置，存 localStorage：API Key、语言、主题、位置、朗读音色、模型、深度思考与智能搜索开关、侧边栏收起状态 */
+ type Settings = {
+   apiKey: string | null
++  model: string
+   locale: Locale
+   themePreference: ThemePreference
+   location: UserLocation | null
+@@ -21,6 +22,7 @@ type Settings = {
+ 
+ const KEYS = {
+   apiKey: 'chat-demo:api-key',
++  model: 'chat-demo:model',
+   locale: 'chat-demo:locale',
+   location: 'chat-demo:location',
+   themePreference: 'chat-demo:theme-preference',
+@@ -87,8 +89,12 @@ const initialThemePreference = (): ThemePreference => {
+ /** 未保存过时使用服务端默认音色 stella（海星） */
+ const initialTtsVoice = (): TtsVoice => (read(KEYS.ttsVoice) === 'tide' ? 'tide' : 'stella')
+ 
++/** 未保存过时使用 deepseek-flash（支持深度思考与图片输入）；可选项由宿主配置提供 */
++const initialModel = (): string => read(KEYS.model) || 'deepseek-flash'
++
+ export const useSettings = create<Settings>(() => ({
+   apiKey: read(KEYS.apiKey),
++  model: initialModel(),
+   locale: initialLocale(),
+   location: initialLocation(),
+   themePreference: initialThemePreference(),
+@@ -124,6 +130,11 @@ export const setApiKey = (apiKey: string | null) => {
+   useSettings.setState({ apiKey })
+ }
+ 
++export const setModel = (model: string) => {
++  write(KEYS.model, model)
++  useSettings.setState({ model })
++}
++
+ export const setThinking = (thinking: boolean) => {
+   write(KEYS.thinking, String(thinking))
+   useSettings.setState({ thinking })
