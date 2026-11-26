@@ -11,7 +11,7 @@ same API configuration and model catalog the local DSH already uses.
 > identify the software being integrated. See
 > [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-<img width="1440" height="900" alt="image" src="https://github.com/user-attachments/assets/09cefe93-8350-49b5-aecd-d8a53cb7bc8e" />
+<img width="1440" height="900" alt="main page" src="https://github.com/user-attachments/assets/f647a649-5bb8-4584-8aad-426e47f94865" />
 
 ![Chat-demo opened as a standalone page](docs/new-page.png)
 
